@@ -1,5 +1,5 @@
-# Name:
-# Student ID:
+# Name: Shike Huang
+# Student ID:20617951
 # References (list any resources you've used in developing the code)
 # e.g. - Flask documentation: https://flask.palletsprojects.com/en/stable/
 
@@ -60,7 +60,6 @@ def upload_route():
             flash('No file selected. Please upload a valid file.', 'warning')
             return redirect(url_for('upload_route'))
 
-        # Define the path to save the uploaded file
         uploaded_file_path = UPLOAD_FOLDER / 'Customers.tsv'
 
         try:
@@ -75,14 +74,11 @@ def upload_route():
             update_customers(uploaded_file_path)
             flash('Customers updated successfully.', 'success')
         except Exception as e:
-            # Handle errors during file saving or database update
             flash(f'An error occurred: {str(e)}', 'danger')
             return redirect(url_for('upload_route'))
 
-        # Redirect to the home page after successful upload
         return redirect(url_for('index'))
 
-    # Render the upload page for GET requests
     return render_template('upload.html')
 
 @app.route('/statistics/', methods=['GET', 'POST'])
@@ -98,7 +94,25 @@ def statistics():
         - The 'statistics.html' template.
     """
     # You may need to modify or remove the following line of code
-    return render_template('statistics.html')
+    countries = get_all_countries()
+    selected_country = 'All'
+    stats = []
+
+    if request.method == 'POST':
+        country = request.form.get('country')
+        
+        # Validate country selection
+        if country not in countries:
+            flash('Invalid country selected', 'danger')
+            return redirect(url_for('statistics'))
+        
+        selected_country = country
+        stats = get_statistics(country)
+    
+    return render_template('statistics.html', 
+                           countries=countries, 
+                           statistics=stats, 
+                           selected_country=selected_country)
 
 @app.route('/invoice/', methods=['GET'])
 def invoice():
@@ -110,7 +124,9 @@ def invoice():
         - The 'invoice.html' template.
     """
     # You may need to modify or remove the following line of code
-    return render_template('invoice.html')
+    customers = get_all_customers()
+    albums = get_all_albums()
+    return render_template('invoice.html', customers=customers, albums=albums)
 
 @app.route('/generate_invoice/', methods=['POST'])
 def generate_invoice():
@@ -124,8 +140,35 @@ def generate_invoice():
     # Placeholder for future functionality
 
     # You may need to modify or remove the following line of code
-    return render_template('invoice.html')
+    try:
+        customer_id = request.form.get('customer')
+        address = request.form.get('address')
+        city = request.form.get('city')
+        country = request.form.get('country')
+        postal_code = request.form.get('postal_code')
+        album_selections = request.form.getlist('albums')
 
+        # Validate inputs
+        if not customer_id or not album_selections:
+            flash("Customer and albums must be selected.", "danger")
+            return redirect(url_for('invoice'))
+
+        # Process the invoice in the database
+        process_invoice_in_db(
+            customer_id=int(customer_id),
+            selections=album_selections,
+            address=address,
+            city=city,
+            country=country,
+            postal_code=postal_code
+        )
+
+        flash("Invoice generated successfully.", "success")
+        return redirect(url_for('invoice'))
+    except Exception as e:
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('invoice'))
+    
 @app.errorhandler(404)
 def page_not_found(e):
     """
@@ -151,7 +194,49 @@ def update_customers(customer_tsv_file):
         customer_tsv_file (Path): The path to the TSV file containing customer data to update.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    try:
+        connection = sqlite3.connect(DB_FILE)
+        cursor = connection.cursor()
+
+        # Open and read the TSV file
+        with open(customer_tsv_file, 'r') as f:
+            reader = csv.reader(f, delimiter='\t')  
+            for row in reader:
+                customer_id = row[0] if len(row) > 0 else None
+                phone = row[9] if len(row) > 9 else None
+                fax = row[10] if len(row) > 10 else None
+
+                if not customer_id or not phone:
+                    continue
+
+                # Update the customer data if the CustomerId exists
+                cursor.execute("SELECT 1 FROM Customer WHERE CustomerId = ?", (customer_id,))
+                if cursor.fetchone():
+                    if fax:
+                        # Update both phone and fax
+                        cursor.execute(
+                            """
+                            UPDATE Customer
+                            SET Phone = ?, Fax = ?
+                            WHERE CustomerId = ?
+                            """,
+                            (phone, fax, customer_id)
+                        )
+                    else:
+                        # Update only the phone
+                        cursor.execute(
+                            """
+                            UPDATE Customer
+                            SET Phone = ?
+                            WHERE CustomerId = ?
+                            """,
+                            (phone, customer_id)
+                        ) 
+        connection.commit()
+        connection.close()
+        flash('Customers updated successfully.', 'success')
+    except Exception as e:
+        flash(f'An error occurred while updating customers: {str(e)}', 'danger')
 
 def get_all_countries():
     """
@@ -159,7 +244,16 @@ def get_all_countries():
     Task 2: Retrieve all countries from the database.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+    
+    cursor.execute("SELECT DISTINCT Country FROM Customer")
+    countries = [row[0] for row in cursor.fetchall()]
+    countries.sort()
+    
+    connection.close()
+    
+    return ['All'] + countries
 
 def get_statistics(country):
     """
@@ -170,7 +264,57 @@ def get_statistics(country):
         country (str): The country for which to retrieve statistics.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+    
+    # Query for all customers or specific country
+    if country == 'All':
+        cursor.execute("SELECT CustomerId, FirstName, LastName, Email, City FROM Customer")
+    else:
+        cursor.execute("SELECT CustomerId, FirstName, LastName, Email, City FROM Customer WHERE Country = ?", (country,))
+    
+    customers = cursor.fetchall()
+    statistics = []
+    total_invoices = 0
+    total_amount = 0.0
+
+    for customer in customers:
+        customer_id, first_name, last_name, email, city = customer
+        
+        cursor.execute("SELECT COUNT(InvoiceId), COALESCE(SUM(Total), 0) FROM Invoice WHERE CustomerId = ?", (customer_id,))
+        invoice_count, total_invoice_amount = cursor.fetchone()
+        
+        avg_amount = round(total_invoice_amount / invoice_count, 2) if invoice_count > 0 else 0.00
+        
+        # Add customer statistics to list
+        statistics.append({
+            'customer_id': customer_id,
+            'name': f"{first_name} {last_name.upper()}",
+            'email': email,
+            'city': city,
+            'number_of_invoices': invoice_count,
+            'total_amount': round(total_invoice_amount, 2),
+            'average_amount': avg_amount
+        })
+        
+        # Update aggregated values
+        total_invoices += invoice_count
+        total_amount += total_invoice_amount
+
+    connection.close()
+    
+    statistics.append({
+        'customer_id': 'Total',
+        'name': '',
+        'email': '',
+        'city': '',
+        'number_of_invoices': total_invoices,
+        'total_amount': round(total_amount, 2),
+        'average_amount': round(total_amount / total_invoices, 2) if total_invoices > 0 else 0.00
+    })
+    
+    return statistics
+
 
 def get_all_customers():
     """
@@ -178,7 +322,28 @@ def get_all_customers():
     Task 3: Retrieve all customers from the database.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT CustomerId, FirstName, LastName, Address, City, Country, PostalCode
+        FROM Customer
+        ORDER BY FirstName, LastName
+    """)    
+    customers = [
+        {
+            'customer_id': row[0],
+            'name': f"{row[1]} {row[2].upper()}",
+            'address': row[3] or '',
+            'city': row[4] or '',
+            'country': row[5] or '',
+            'postal_code': row[6] or ''
+        }
+        for row in cursor.fetchall()
+    ]
+
+    connection.close()
+    return customers
 
 def get_all_albums():
     """
@@ -186,7 +351,27 @@ def get_all_albums():
     Task 3: Retrieve all albums from the database.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT Album.AlbumId, Album.Title, Artist.Name, 9.99 AS Price
+        FROM Album
+        JOIN Artist ON Album.ArtistId = Artist.ArtistId
+        ORDER BY Album.Title
+    """)
+    albums = [
+        {
+            'album_id': row[0],
+            'title': row[1],
+            'artist': row[2],
+            'price': row[3]  # Static price
+        }
+        for row in cursor.fetchall()
+    ]
+
+    connection.close()
+    return albums
 
 def process_invoice_in_db(customer_id, selections, address, city, country, postal_code):
     """
@@ -202,7 +387,28 @@ def process_invoice_in_db(customer_id, selections, address, city, country, posta
         postal_code (str): The customer's postal code.
     """
     # You will need to remove the pass statement and write your code here
-    pass
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO Invoice (CustomerId, InvoiceDate, BillingAddress, BillingCity, BillingCountry, BillingPostalCode, Total)
+        VALUES (?, DATE('now'), ?, ?, ?, ?, ?)
+    """, (customer_id, address, city, country, postal_code, len(selections) * 9.99))
+
+    invoice_id = cursor.lastrowid
+
+    for album_id in selections:
+        cursor.execute("""
+            INSERT INTO InvoiceLine (InvoiceId, TrackId, UnitPrice, Quantity)
+            SELECT ?, TrackId, 9.99, 1
+            FROM Track
+            WHERE AlbumId = ?
+            LIMIT 1
+        """, (invoice_id, album_id))
+
+    connection.commit()
+    connection.close()
+
 
 
 ####################
